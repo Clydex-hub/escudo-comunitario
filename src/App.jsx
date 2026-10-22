@@ -49,101 +49,138 @@ useEffect(() => {
 
   
 
-  async function analyzeEvidence() {
-    const text = evidence.trim();
+  
+async function analyzeEvidence() {
+  const text = evidence.trim();
 
-    if (!authReady || !userId) {
-  alert("La sesión todavía no está lista. Inténtalo de nuevo en unos segundos.");
-  return;
-}
-    if (!text) {
-      setResult({
-        level: "empty",
-        title: "Necesitamos contenido para analizar",
-        details: "Pega un mensaje o enlace en el campo de texto e inténtalo de nuevo.",
-        signals: [],
+  if (!authReady || !userId) {
+    alert("La sesión todavía no está lista. Inténtalo de nuevo.");
+    return;
+  }
+
+  if (!text) {
+    setResult({
+      level: "empty",
+      title: "Necesitamos contenido para analizar",
+      details: "Pega un mensaje o enlace e inténtalo de nuevo.",
+      signals: [],
+    });
+    return;
+  }
+
+  if (text.length > 6000) {
+    alert("El mensaje no puede superar los 6000 caracteres.");
+    return;
+  }
+
+  try {
+    // 1. Solicitar el análisis a Gemini a través de Supabase
+    const { data, error: aiError } =
+      await supabase.functions.invoke("analizar-fraude", {
+        body: { mensaje: text },
       });
 
-      return;
+    if (aiError) {
+      console.error("Error al llamar al analizador:", aiError);
+      throw new Error("No se pudo conectar con el analizador de IA.");
     }
 
-    const indicators = [
-      {
-        name: "Urgencia o amenazas",
-        pattern: /urgente|inmediatamente|última oportunidad|será bloqueada|suspendida|hoy mismo/i,
-      },
-      {
-        name: "Solicitud de datos sensibles",
-        pattern: /contraseña|clave|código de verificación|datos bancarios|número de tarjeta/i,
-      },
-      {
-        name: "Promesas o premios inesperados",
-        pattern: /ganaste|premio|regalo|dinero gratis|felicitaciones/i,
-      },
-      {
-        name: "Enlaces para verificar o actualizar datos",
-        pattern: /https?:\/\/|www\.|verifica tus datos|ingresa a este enlace|haz clic/i,
-      },
-    ];
+    const analysis = data?.analysis;
 
-    const detected = indicators
-      .filter((indicator) => indicator.pattern.test(text))
-      .map((indicator) => indicator.name);
-
-    let level = "low";
-    let title = "Pocas señales de alerta detectadas";
-    let details =
-      "Este análisis básico no encontró muchas de las señales configuradas. Esto no significa que el contenido sea seguro.";
-
-    if (detected.length >= 2) {
-      level = "high";
-      title = "Se detectaron varias señales de alerta";
-      details =
-        "El contenido presenta patrones que pueden aparecer en intentos de fraude. Verifica el mensaje por un canal oficial antes de actuar.";
-    } else if (detected.length === 1) {
-      level = "medium";
-      title = "Se detectó una señal de alerta";
-      details =
-        "Hay un elemento que merece revisión. No compartas datos personales ni abras enlaces sin verificar su origen.";
+    if (
+      !analysis ||
+      !["low", "medium", "high"].includes(analysis.risk_level) ||
+      typeof analysis.summary !== "string" ||
+      !Array.isArray(analysis.signals) ||
+      !Array.isArray(analysis.recommended_actions) ||
+      !Array.isArray(analysis.should_not_do)
+    ) {
+      throw new Error("La respuesta del analizador no es válida.");
     }
 
-    
+    // 2. Adaptar la respuesta de Gemini a la interfaz existente
+    const level = analysis.risk_level;
+
+    const titles = {
+      low: "Pocas señales de alerta detectadas",
+      medium: "Se detectaron señales que requieren revisión",
+      high: "Se detectaron señales importantes de alerta",
+    };
+
+    const detected = analysis.signals.filter(
+      (item) => typeof item === "string"
+    );
+
+    const recommendations = analysis.recommended_actions
+      .filter((item) => typeof item === "string")
+      .map((item) => `• ${item}`)
+      .join("\n");
+
+    const avoid = analysis.should_not_do
+      .filter((item) => typeof item === "string")
+      .map((item) => `• ${item}`)
+      .join("\n");
+
+    const details = [
+      analysis.summary,
+      "",
+      "Qué debes hacer:",
+      recommendations || "Verifica el mensaje por canales oficiales.",
+      "",
+      "Qué debes evitar:",
+      avoid || "No compartas información sensible sin verificar.",
+      "",
+      analysis.disclaimer || 
+        "La evaluación es orientativa; verifica por canales oficiales.",
+    ].join("\n");
+
     setResult({
       level,
-      title,
+      title: titles[level],
       details,
       signals: detected,
     });
 
-    
-const hashBuffer = await crypto.subtle.digest(
-  "SHA-256",
-  new TextEncoder().encode(text)
-);
+    // 3. Calcular la huella SHA-256 de la evidencia original
+    const hashBuffer = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(text)
+    );
 
-const evidenceHash = Array.from(new Uint8Array(hashBuffer))
-  .map((byte) => byte.toString(16).padStart(2, "0"))
-  .join("");
-  setEvidenceHash(evidenceHash);
+    const evidenceHash = Array.from(new Uint8Array(hashBuffer))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
 
+    setEvidenceHash(evidenceHash);
 
-    const { error } = await supabase.from("cases").insert({
-      user_id: userId,
-      content: text,
-      risk_level: level,
-      signals: detected,
-      analysis_details: details,
-      evidence_hash: evidenceHash,
-    });
+    // 4. Guardar el resultado de Gemini en Supabase
+    const { error: saveError } = await supabase
+      .from("cases")
+      .insert({
+        user_id: userId,
+        content: text,
+        risk_level: level,
+        signals: detected,
+        analysis_details: details,
+        evidence_hash: evidenceHash,
+      });
 
-    if (error) {
-      console.error("Error al guardar el caso:", error);
+    if (saveError) {
+      console.error("Error al guardar el caso:", saveError);
       alert("El análisis terminó, pero no se pudo guardar el caso.");
     } else {
-      alert("¡Análisis guardado correctamente en Supabase!");
+      alert("¡Análisis de Gemini guardado correctamente!");
     }
-
+  } catch (error) {
+    console.error("Error durante el análisis:", error);
+    alert(
+      error instanceof Error
+        ? error.message
+        : "No se pudo completar el análisis. Inténtalo de nuevo."
+    );
   }
+}
+
 
   
 async function loadCases() {
@@ -315,7 +352,8 @@ async function verifyEvidence(item) {
             )}
 
             <p className="disclaimer">
-              Esta herramienta usa reglas básicas, no inteligencia artificial.
+              Esta evaluación utiliza inteligencia artificial para identificar posibles señales de fraude. 
+              El resultado es orientativo y no confirma ni descarta por sí solo un fraude.
               El resultado no confirma ni descarta por sí solo un fraude.
             </p>
             
